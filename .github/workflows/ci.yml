@@ -8,7 +8,8 @@ name: CI
 #
 # Pull requests arrive as repository_dispatch (event type ci) with
 # client_payload repo (owner/name or https://github.com/owner/name), pr, sha
-# (merge commit to test), head_sha and base_sha. Manual runs take the
+# (merge commit to test), head_sha, base_sha and optionally log_key (as the
+# log-key input). Manual runs take the
 # repository and a branch, tag or commit. The repository is masked in the logs. The result goes back to the private
 # repository as the commit status "CI success".
 #
@@ -33,6 +34,8 @@ on:
       ref:
         description: Branch, tag or commit to test.
         default: develop
+      log-key:
+        description: Optional OpenPGP public key to encrypt this run's logs to, armored or base64 on one line (e.g. `gpg --export KEY | base64 -w0`). Overrides LOG_PUBLIC_KEY.
       run-all-e2e:
         description: Run every end-to-end test, not only those covering the files changed compared with develop.
         type: boolean
@@ -116,8 +119,15 @@ jobs:
       - name: Encrypt the log
         if: always()
         run: |
-          if [ -n "$LOG_PUBLIC_KEY" ]; then
-            printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          # the run's own key wins over the variable
+          key=$(jq -r '.client_payload.log_key // .inputs["log-key"] // empty' "$GITHUB_EVENT_PATH")
+          key=${key:-$LOG_PUBLIC_KEY}
+          if [ -n "$key" ]; then
+            # armored, or base64 on one line for the run form's text box
+            case $key in
+              -----BEGIN*) printf '%s\n' "$key" > "$RUNNER_TEMP/key.asc" ;;
+              *) base64 -d <<< "$key" > "$RUNNER_TEMP/key.asc" ;;
+            esac
           else
             # no key set: a throwaway one whose private half goes with the runner,
             # so nobody can read the log
@@ -204,8 +214,15 @@ jobs:
       - name: Encrypt the log
         if: always()
         run: |
-          if [ -n "$LOG_PUBLIC_KEY" ]; then
-            printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          # the run's own key wins over the variable
+          key=$(jq -r '.client_payload.log_key // .inputs["log-key"] // empty' "$GITHUB_EVENT_PATH")
+          key=${key:-$LOG_PUBLIC_KEY}
+          if [ -n "$key" ]; then
+            # armored, or base64 on one line for the run form's text box
+            case $key in
+              -----BEGIN*) printf '%s\n' "$key" > "$RUNNER_TEMP/key.asc" ;;
+              *) base64 -d <<< "$key" > "$RUNNER_TEMP/key.asc" ;;
+            esac
           else
             # no key set: a throwaway one whose private half goes with the runner,
             # so nobody can read the log
