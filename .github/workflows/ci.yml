@@ -10,7 +10,8 @@ name: CI
 # client_payload repo (owner/name or https://github.com/owner/name), pr, sha
 # (merge commit to test), head_sha, base_sha and optionally log_key (as the
 # log-key input). Manual runs take the
-# repository and a branch, tag or commit. The repository is masked in the logs. The result goes back to the private
+# repository and a branch, tag or commit, and run everything only when full is
+# checked. The repository is masked in the logs. The result goes back to the private
 # repository as the commit status "CI success".
 #
 # Setup:
@@ -36,6 +37,10 @@ on:
         default: develop
       log-key:
         description: Optional OpenPGP public key to encrypt this run's logs to, armored or base64 on one line (e.g. `gpg --export KEY | base64 -w0`). Overrides LOG_PUBLIC_KEY.
+      full:
+        description: Also run the migration, integration and end-to-end tests (about an hour). Otherwise only the checks and unit tests run.
+        type: boolean
+        default: false
       run-all-e2e:
         description: Run every end-to-end test, not only those covering the files changed compared with develop.
         type: boolean
@@ -115,6 +120,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.client_payload.base_sha }}
           HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          FULL: ${{ inputs.full }}
           RUN_ALL_E2E: ${{ inputs.run-all-e2e }}
       - name: Encrypt the log
         if: always()
