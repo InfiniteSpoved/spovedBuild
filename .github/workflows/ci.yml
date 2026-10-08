@@ -82,7 +82,8 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "status-sha=${status_sha:-$sha}" >> "$GITHUB_OUTPUT"
           gh api "repos/$REPO/statuses/${status_sha:-$sha}" -f state=pending -f context="CI success" \
-            -f target_url="$RUN_URL" -f description="Running" > /dev/null 2>&1 || { echo "Could not set the commit status"; exit 1; }
+            -f target_url="$RUN_URL" -f description="Running" > /dev/null 2>&1 ||
+            echo "::warning::Could not set the commit status: the token needs Commit statuses: read and write"
         env:
           GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
           EVENT: ${{ github.event_name }}
@@ -249,7 +250,8 @@ jobs:
           [ "$FAILED" = false ] || state=failure
           if [ -n "$STATUS_SHA" ]; then
             gh api "repos/$REPO/statuses/$STATUS_SHA" -f state="$state" -f context="CI success" \
-              -f target_url="$RUN_URL" -f description="$state" > /dev/null 2>&1
+              -f target_url="$RUN_URL" -f description="$state" > /dev/null 2>&1 ||
+              echo "::warning::Could not set the commit status: the token needs Commit statuses: read and write"
           fi
           echo "$state"
           [ "$state" = success ]
