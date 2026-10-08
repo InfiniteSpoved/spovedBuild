@@ -6,9 +6,10 @@ name: CI
 # names the commit), each job's output goes to a file that is uploaded
 # encrypted, and the public log only shows whether the job passed.
 #
-# Pull requests arrive as repository_dispatch (event type spoved-ci) with
-# client_payload pr, sha (merge commit to test), head_sha and base_sha. Manual
-# runs take a branch, tag or commit. The result goes back to the private
+# Pull requests arrive as repository_dispatch (event type ci) with
+# client_payload repo (owner/name or https://github.com/owner/name), pr, sha
+# (merge commit to test), head_sha and base_sha. Manual runs take the
+# repository and a branch, tag or commit. The repository is masked in the logs. The result goes back to the private
 # repository as the commit status "CI success".
 #
 # Setup:
@@ -22,9 +23,12 @@ name: CI
 
 on:
   repository_dispatch:
-    types: [spoved-ci]
+    types: [ci]
   workflow_dispatch:
     inputs:
+      repo:
+        description: Repository to test, owner/name or its https://github.com URL.
+        required: true
       ref:
         description: Branch, tag or commit to test.
         default: develop
@@ -42,7 +46,6 @@ permissions:
   contents: read
 
 env:
-  REPO: InfiniteSpoved/spoved
   # outside the checkout, so that it is not part of the tested tree
   LOG: /tmp/ci.log
 
@@ -56,6 +59,16 @@ jobs:
       sha: ${{ steps.commit.outputs.sha }}
       status-sha: ${{ steps.commit.outputs.status-sha }}
     steps:
+      # Read from the event rather than an expression or env, which the log
+      # would print, and masked for every later step of the job
+      - name: Read the repository
+        run: |
+          repo=$(jq -r '.client_payload.repo // .inputs.repo // empty' "$GITHUB_EVENT_PATH")
+          repo=${repo#https://github.com/}
+          repo=${repo%.git}
+          [ -n "$repo" ] || { echo "No repository given"; exit 1; }
+          echo "::add-mask::$repo"
+          echo "REPO=$repo" >> "$GITHUB_ENV"
       - name: Resolve the commit
         id: commit
         run: |
@@ -127,6 +140,16 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.tasks) }}
     steps:
+      # Read from the event rather than an expression or env, which the log
+      # would print, and masked for every later step of the job
+      - name: Read the repository
+        run: |
+          repo=$(jq -r '.client_payload.repo // .inputs.repo // empty' "$GITHUB_EVENT_PATH")
+          repo=${repo#https://github.com/}
+          repo=${repo%.git}
+          [ -n "$repo" ] || { echo "No repository given"; exit 1; }
+          echo "::add-mask::$repo"
+          echo "REPO=$repo" >> "$GITHUB_ENV"
       - name: Fetch the code
         run: |
           {
@@ -194,6 +217,15 @@ jobs:
     needs: [plan, run]
     runs-on: ubuntu-latest
     steps:
+      # Read from the event rather than an expression or env, which the log
+      # would print, and masked for every later step of the job
+      - name: Read the repository
+        run: |
+          repo=$(jq -r '.client_payload.repo // .inputs.repo // empty' "$GITHUB_EVENT_PATH")
+          repo=${repo#https://github.com/}
+          repo=${repo%.git}
+          echo "::add-mask::$repo"
+          echo "REPO=$repo" >> "$GITHUB_ENV"
       - name: Report the result
         run: |
           state=success
