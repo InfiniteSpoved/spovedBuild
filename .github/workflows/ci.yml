@@ -11,7 +11,8 @@ name: CI
 # (merge commit to test), head_sha, base_sha and optionally log_key (as the
 # log-key input). Manual runs take the
 # repository and a branch, tag or commit, and run everything only when full is
-# checked. The repository is masked in the logs. The result goes back to the private
+# checked; `only` limits a manual run to some stages and reports "CI partial"
+# instead. The repository is masked in the logs. The result goes back to the private
 # repository as the commit status "CI success".
 #
 # Setup:
@@ -45,6 +46,9 @@ on:
         description: Run every end-to-end test, not only those covering the files changed compared with develop.
         type: boolean
         default: true
+      only:
+        description: Optional comma-separated stages to run (lint, frontend, unit, migrations, integration, e2e), for iterating on a fix. Such a run reports the status "CI partial", never "CI success".
+        default: ''
 
 concurrency:
   # never a branch name, which the cancellation message would show
@@ -89,11 +93,12 @@ jobs:
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "status-sha=${status_sha:-$sha}" >> "$GITHUB_OUTPUT"
-          gh api "repos/$REPO/statuses/${status_sha:-$sha}" -f state=pending -f context="CI success" \
+          gh api "repos/$REPO/statuses/${status_sha:-$sha}" -f state=pending -f context="$CONTEXT" \
             -f target_url="$RUN_URL" -f description="Running" > /dev/null 2>&1 ||
             echo "::warning::Could not set the commit status: the token needs Commit statuses: read and write"
         env:
           GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          CONTEXT: ${{ inputs.only && 'CI partial' || 'CI success' }}
           EVENT: ${{ github.event_name }}
           REF: ${{ inputs.ref }}
           PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
@@ -122,6 +127,7 @@ jobs:
           HEAD_SHA: ${{ github.event.client_payload.head_sha }}
           FULL: ${{ inputs.full }}
           RUN_ALL_E2E: ${{ inputs.run-all-e2e }}
+          ONLY: ${{ inputs.only }}
       - name: Encrypt the log
         if: always()
         run: |
@@ -272,7 +278,7 @@ jobs:
           state=success
           [ "$FAILED" = false ] || state=failure
           if [ -n "$STATUS_SHA" ]; then
-            gh api "repos/$REPO/statuses/$STATUS_SHA" -f state="$state" -f context="CI success" \
+            gh api "repos/$REPO/statuses/$STATUS_SHA" -f state="$state" -f context="$CONTEXT" \
               -f target_url="$RUN_URL" -f description="$state" > /dev/null 2>&1 ||
               echo "::warning::Could not set the commit status: the token needs Commit statuses: read and write"
           fi
@@ -280,6 +286,7 @@ jobs:
           [ "$state" = success ]
         env:
           GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          CONTEXT: ${{ inputs.only && 'CI partial' || 'CI success' }}
           FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
           STATUS_SHA: ${{ needs.plan.outputs.status-sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
