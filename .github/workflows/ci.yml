@@ -15,7 +15,8 @@ name: CI
 # Setup:
 # - Secret SPOVEDREADTOKEN: fine-grained token for the private repository with
 #   Contents: read and Commit statuses: read and write.
-# - Variable LOG_PUBLIC_KEY: an armored OpenPGP public key. Read a job's log
+# - Variable LOG_PUBLIC_KEY: an armored OpenPGP public key. Without it, logs
+#   are encrypted to a throwaway key and nobody can read them. Read a job's log
 #   with `gpg -d log.gpg` after downloading its artifact: log-plan, or log-N
 #   for "Job N".
 # - Settings → Actions → General: require approval for workflows from all
@@ -72,7 +73,6 @@ jobs:
       - name: Resolve the commit
         id: commit
         run: |
-          [ -n "$LOG_PUBLIC_KEY" ] || { echo "Variable LOG_PUBLIC_KEY is not set"; exit 1; }
           if [ "$EVENT" = repository_dispatch ]; then
             sha=$PAYLOAD_SHA
             status_sha=$HEAD_SHA
@@ -85,7 +85,6 @@ jobs:
             -f target_url="$RUN_URL" -f description="Running" > /dev/null 2>&1 || { echo "Could not set the commit status"; exit 1; }
         env:
           GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
-          LOG_PUBLIC_KEY: ${{ vars.LOG_PUBLIC_KEY }}
           EVENT: ${{ github.event_name }}
           REF: ${{ inputs.ref }}
           PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
@@ -116,7 +115,16 @@ jobs:
       - name: Encrypt the log
         if: always()
         run: |
-          printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          if [ -n "$LOG_PUBLIC_KEY" ]; then
+            printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          else
+            # no key set: a throwaway one whose private half goes with the runner,
+            # so nobody can read the log
+            export GNUPGHOME="$RUNNER_TEMP/gnupg"
+            mkdir -m 700 "$GNUPGHOME"
+            gpg --batch --quiet --passphrase '' --quick-gen-key ci-log default default never > /dev/null 2>&1
+            gpg --armor --export ci-log > "$RUNNER_TEMP/key.asc"
+          fi
           touch "$LOG"
           gpg --batch --yes --quiet --trust-model always --recipient-file "$RUNNER_TEMP/key.asc" \
             --output "$RUNNER_TEMP/log.gpg" --encrypt "$LOG" > /dev/null 2>&1 || { echo "Could not encrypt the log"; exit 1; }
@@ -195,7 +203,16 @@ jobs:
       - name: Encrypt the log
         if: always()
         run: |
-          printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          if [ -n "$LOG_PUBLIC_KEY" ]; then
+            printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          else
+            # no key set: a throwaway one whose private half goes with the runner,
+            # so nobody can read the log
+            export GNUPGHOME="$RUNNER_TEMP/gnupg"
+            mkdir -m 700 "$GNUPGHOME"
+            gpg --batch --quiet --passphrase '' --quick-gen-key ci-log default default never > /dev/null 2>&1
+            gpg --armor --export ci-log > "$RUNNER_TEMP/key.asc"
+          fi
           touch "$LOG"
           gpg --batch --yes --quiet --trust-model always --recipient-file "$RUNNER_TEMP/key.asc" \
             --output "$RUNNER_TEMP/log.gpg" --encrypt "$LOG" > /dev/null 2>&1 || { echo "Could not encrypt the log"; exit 1; }
