@@ -1,0 +1,211 @@
+name: CI
+
+# Runs the CI of a private repository. What each job does lives in that
+# repository (.github/ci/job.sh). This repository is public, so no step prints
+# anything about it: the code is fetched without actions/checkout (whose log
+# names the commit), each job's output goes to a file that is uploaded
+# encrypted, and the public log only shows whether the job passed.
+#
+# Pull requests arrive as repository_dispatch (event type spoved-ci) with
+# client_payload pr, sha (merge commit to test), head_sha and base_sha. Manual
+# runs take a branch, tag or commit. The result goes back to the private
+# repository as the commit status "CI success".
+#
+# Setup:
+# - Secret SPOVEDREADTOKEN: fine-grained token for the private repository with
+#   Contents: read and Commit statuses: read and write.
+# - Variable LOG_PUBLIC_KEY: an armored OpenPGP public key. Read a job's log
+#   with `gpg -d log.gpg` after downloading its artifact: log-plan, or log-N
+#   for "Job N".
+# - Settings → Actions → General: require approval for workflows from all
+#   outside collaborators, as the caches hold compiled code.
+
+on:
+  repository_dispatch:
+    types: [spoved-ci]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test.
+        default: develop
+      run-all-e2e:
+        description: Run every end-to-end test, not only those covering the files changed compared with develop.
+        type: boolean
+        default: true
+
+concurrency:
+  # never a branch name, which the cancellation message would show
+  group: ci-${{ github.event.client_payload.pr || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REPO: InfiniteSpoved/spoved
+  # outside the checkout, so that it is not part of the tested tree
+  LOG: /tmp/ci.log
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tasks: ${{ steps.plan.outputs.tasks }}
+      sha: ${{ steps.commit.outputs.sha }}
+      status-sha: ${{ steps.commit.outputs.status-sha }}
+    steps:
+      - name: Resolve the commit
+        id: commit
+        run: |
+          [ -n "$LOG_PUBLIC_KEY" ] || { echo "Variable LOG_PUBLIC_KEY is not set"; exit 1; }
+          if [ "$EVENT" = repository_dispatch ]; then
+            sha=$PAYLOAD_SHA
+            status_sha=$HEAD_SHA
+          else
+            sha=$(gh api "repos/$REPO/commits/$REF" --jq .sha 2> /dev/null) || { echo "Unknown ref"; exit 1; }
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "status-sha=${status_sha:-$sha}" >> "$GITHUB_OUTPUT"
+          gh api "repos/$REPO/statuses/${status_sha:-$sha}" -f state=pending -f context="CI success" \
+            -f target_url="$RUN_URL" -f description="Running" > /dev/null 2>&1 || { echo "Could not set the commit status"; exit 1; }
+        env:
+          GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          LOG_PUBLIC_KEY: ${{ vars.LOG_PUBLIC_KEY }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ inputs.ref }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - name: Fetch the code
+        run: |
+          {
+            git init -q .
+            git remote add origin "https://github.com/$REPO"
+            git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+            git fetch -q --no-tags ${DEPTH:+--depth=$DEPTH} origin "$SHA" +refs/heads/develop:refs/remotes/origin/develop
+            git config --unset http.https://github.com/.extraheader
+            git checkout -q --detach "$SHA"
+          } >> "$LOG" 2>&1
+        env:
+          TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          SHA: ${{ steps.commit.outputs.sha }}
+          # no DEPTH: the plan compares the pull request with its base, so it needs the history
+      - name: Plan
+        id: plan
+        run: .github/ci/job.sh plan >> "$LOG" 2>&1
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.client_payload.base_sha }}
+          HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          RUN_ALL_E2E: ${{ inputs.run-all-e2e }}
+      - name: Encrypt the log
+        if: always()
+        run: |
+          printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          touch "$LOG"
+          gpg --batch --yes --quiet --trust-model always --recipient-file "$RUNNER_TEMP/key.asc" \
+            --output "$RUNNER_TEMP/log.gpg" --encrypt "$LOG" > /dev/null 2>&1 || { echo "Could not encrypt the log"; exit 1; }
+        env:
+          LOG_PUBLIC_KEY: ${{ vars.LOG_PUBLIC_KEY }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-plan
+          path: ${{ runner.temp }}/log.gpg
+          if-no-files-found: ignore
+          retention-days: 7
+
+  run:
+    name: Job ${{ strategy.job-index }}
+    needs: [plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tasks) }}
+    steps:
+      - name: Fetch the code
+        run: |
+          {
+            git init -q .
+            git remote add origin "https://github.com/$REPO"
+            git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+            git fetch -q --no-tags ${DEPTH:+--depth=$DEPTH} origin "$SHA" +refs/heads/develop:refs/remotes/origin/develop
+            git config --unset http.https://github.com/.extraheader
+            git checkout -q --detach "$SHA"
+          } >> "$LOG" 2>&1
+        env:
+          TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          # commits to fetch, empty for the full history
+          DEPTH: ${{ matrix.depth != '0' && matrix.depth || '' }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/golangci-lint
+            ~/.cache/ms-playwright
+          key: tools-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('go.sum', '.golangci.yml', 'package-lock.json') }}-${{ needs.plan.outputs.sha }}
+          restore-keys: |
+            tools-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('go.sum', '.golangci.yml', 'package-lock.json') }}-
+            tools-${{ runner.os }}-${{ matrix.task }}-
+      - name: Run
+        run: |
+          # ARGS is split into words on purpose
+          # shellcheck disable=SC2086
+          .github/ci/job.sh "$TASK" $ARGS >> "$LOG" 2>&1
+        env:
+          TASK: ${{ matrix.task }}
+          ARGS: ${{ matrix.args }}
+          RUN_ALL_E2E: ${{ inputs.run-all-e2e }}
+      - name: Encrypt the log
+        if: always()
+        run: |
+          printf '%s\n' "$LOG_PUBLIC_KEY" > "$RUNNER_TEMP/key.asc"
+          touch "$LOG"
+          gpg --batch --yes --quiet --trust-model always --recipient-file "$RUNNER_TEMP/key.asc" \
+            --output "$RUNNER_TEMP/log.gpg" --encrypt "$LOG" > /dev/null 2>&1 || { echo "Could not encrypt the log"; exit 1; }
+        env:
+          LOG_PUBLIC_KEY: ${{ vars.LOG_PUBLIC_KEY }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/log.gpg
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Reports the result as the commit status "CI success", the single check to
+  # require in the private repository's branch protection rules
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [plan, run]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the result
+        run: |
+          state=success
+          [ "$FAILED" = false ] || state=failure
+          if [ -n "$STATUS_SHA" ]; then
+            gh api "repos/$REPO/statuses/$STATUS_SHA" -f state="$state" -f context="CI success" \
+              -f target_url="$RUN_URL" -f description="$state" > /dev/null 2>&1
+          fi
+          echo "$state"
+          [ "$state" = success ]
+        env:
+          GH_TOKEN: ${{ secrets.SPOVEDREADTOKEN }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          STATUS_SHA: ${{ needs.plan.outputs.status-sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
