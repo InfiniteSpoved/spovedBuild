@@ -9,7 +9,7 @@ name: CI
 # Pull requests arrive as repository_dispatch (event type ci) with
 # client_payload repo (owner/name or https://github.com/owner/name), pr, sha
 # (merge commit to test), head_sha, base_sha and optionally log_key (as the
-# log-key input). Manual runs take the
+# log-key input) and full (as the full input). Manual runs take the
 # repository and a branch, tag or commit, and run everything only when full is
 # checked; `only` limits a manual run to some stages and reports "CI partial"
 # instead. The repository is masked in the logs. The result goes back to the private
@@ -125,7 +125,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.client_payload.base_sha }}
           HEAD_SHA: ${{ github.event.client_payload.head_sha }}
-          FULL: ${{ inputs.full }}
+          FULL: ${{ inputs.full || github.event.client_payload.full }}
           RUN_ALL_E2E: ${{ inputs.run-all-e2e }}
           ONLY: ${{ inputs.only }}
       - name: Encrypt the log
